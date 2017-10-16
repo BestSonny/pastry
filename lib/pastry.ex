@@ -32,7 +32,6 @@ defmodule GSP do
     IO.puts "Number Of Nodes: #{numNodes}"
     IO.puts "Node ID Space: 0 ~ #{nodeIDSpace - 1}"
     IO.puts "Number Of Request Per Node: #{numRequests}"
-    IO.puts "Number Of Request Per Node: #{logBase}"
     nodeIDs = for node_id <- 0..nodeIDSpace-1 do
       node_id
     end
