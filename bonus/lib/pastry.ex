@@ -91,9 +91,12 @@ defmodule GSP do
         run(state)
 
       :create_failure ->
-        for i <- 0..state.numFailures-1 do
-          goDieId = Enum.at(state.nodeIDs, i)
-          send ProcessRegistry.whereis_name(goDieId), {:go_die, state.pids}
+        if state.numFailures-1 > 0 do
+          for i <- 0..state.numFailures-1 do
+            IO.puts "hello"
+            goDiePid = ProcessRegistry.whereis_name(Enum.at(state.nodeIDs, i))
+            send goDiePid, {:go_die, state.pids}
+          end
         end
         send self(), :begin_route
         run(state)
@@ -138,7 +141,6 @@ defmodule GSP do
             IO.puts "#{i}0% Routing Finished..."
           end
         end
-
         if numRouted >= (new_state.numNodes - new_state.numFailures) * state.numRequests do
           IO.puts "Number of Total Routes: #{numRouted}"
           IO.puts "Number of Total Hops: #{numHops}"
@@ -250,7 +252,7 @@ defmodule PastryActor do
     state
   end
 
-  def leaf_recovers(newList, state, index)do
+  def leaf_recovers(newList, state, index) do
       node_id = Enum.at(newList, index)
       cond do
         node_id > state.id && !Enum.member?(state.largerLeaf, node_id) ->
@@ -301,7 +303,6 @@ defmodule PastryActor do
           send pid, {:remove_me, state.id}
         end
         Process.exit(self(),:normal)
-        run(state)
 
       {:add_row, rowNumber, newRow} ->
           new_state = replace_row(rowNumber, newRow, state, state.base-1)
@@ -395,7 +396,7 @@ defmodule PastryActor do
           run(state)
 
       {:leaf_recover, tempLeaf, removeId} ->
-          new_state = leaf_recovers(tempLeaf, state,length(tempLeaf)-1)
+          new_state = leaf_recovers(tempLeaf, state, length(tempLeaf)-1)
           run(new_state)
 
       {msg, fromId, toId, hops} ->
@@ -488,7 +489,7 @@ defmodule PastryActor do
                 if diff > leafDiff do
                   pid = ProcessRegistry.whereis_name(nearest_value)
                   if is_pid(pid) do
-                    send ProcessRegistry.whereis_name(nearest_value), {msg, fromId, toId, hops + 1}
+                    send pid, {msg, fromId, toId, hops + 1}
                   end
                 else
                   send state.master, {:route_finished, fromId, toId, hops+1}
@@ -511,17 +512,23 @@ defmodule PastryActor do
                 send state.master, {:route_finished, fromId, toId, hops+1}
 
               Enum.at(Enum.at(state.table, samePre), value) != -1 ->
-
-                send ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, samePre), value)), {msg, fromId, toId, hops + 1}
+                pid = ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, samePre), value))
+                if is_pid(pid) do
+                  send pid, {msg, fromId, toId, hops + 1}
+                end
 
               toId > state.id ->
-
-                send ProcessRegistry.whereis_name(Enum.max(state.largerLeaf)), {msg, fromId, toId, hops + 1}
+                pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
+                if is_pid(pid) do
+                  send pid, {msg, fromId, toId, hops + 1}
+                end
                 send state.master, :route_not_in_both
 
               toId < state.id ->
-
-                send ProcessRegistry.whereis_name(Enum.min(state.lessLeaf)), {msg, fromId, toId, hops + 1}
+                pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
+                if is_pid(pid) do
+                  send pid, {msg, fromId, toId, hops + 1}
+                end
                 send state.master, :route_not_in_both
 
               true ->
