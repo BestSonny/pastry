@@ -19,6 +19,9 @@ defmodule GSP do
   end
 
   def pastry(numNodes, numRequests, base \\ 2) do
+    #process registry
+    {:ok,server_pid} = ProcessRegistry.start_link
+
     base = round(:math.pow(2, base))
     logBase = round(:math.ceil(:math.log(numNodes) / :math.log(base)))
     nodeIDSpace = round(:math.pow(base, logBase))
@@ -43,11 +46,15 @@ defmodule GSP do
           -1
         end
       end
-      PastryActor.new(%{master: self(), numNodes: numNodes, numRequests: numRequests, id: id, table: emptyTable, nodeIDSpace: nodeIDSpace, base: base, length: logBase})
+      pid = PastryActor.new(%{registry: server_pid, master: self(), numNodes: numNodes, numRequests: numRequests, id: id, table: emptyTable, nodeIDSpace: nodeIDSpace, base: base, length: logBase})
+      ProcessRegistry.register_name(id, pid)
+      pid
     end
 
+    ProcessRegistry.register_name(-1, self())
+
     send self(), :go
-    run(Map.merge(@default_state, %{firstGroup: firstGroup, pids: pids, numFirst: numFirst}))
+    run(Map.merge(@default_state, %{firstGroup: firstGroup, pids: pids, numFirst: numFirst, numNodes: numNodes}))
   end
 
   defp run(state) do
@@ -60,12 +67,28 @@ defmodule GSP do
         end
         run(state)
 
+      :second_join ->
+        run(state)
+      :begin_route ->
+        IO.puts "Join Finished!"
+        IO.puts "Routing Begins..."
+        for pid <- state.pids do
+          send pid, :begin_route
+        end
+        run(state)
+
       :join_finish ->
         numJoined = state.numJoined + 1
         new_state = Map.put(state, :numJoined, numJoined)
-        #IO.puts numJoined
+        if numJoined >= state.numNodes do
+          send self(), :begin_route
+        else
+          send self(), :second_join
+        end
         run(new_state)
 
+      {:route_finished, fromId, toId, hops} ->
+        run(state)
     end
   end
 end
@@ -84,7 +107,7 @@ defmodule PastryActor do
   }
 
   def new(state \\ %{}) do
-    pid = spawn_link fn ->
+    spawn_link fn ->
       Map.merge(@default_state, state) |> run
     end
   end
@@ -100,6 +123,79 @@ defmodule PastryActor do
         IO.inspect new_state
         send state.master, :join_finish
         run(new_state)
+
+      {msg, fromId, toId, hops} ->
+        case msg do
+          "route" ->
+          if fromId == toId do
+            send state.master, {:route_finished, fromId, toId, hops+1}
+          else
+            fromIdString = toBaseString(fromId, state.base, state.length)
+            toIdString = toBaseString(toId, state.base, state.length)
+            samePre = String.length(commonPrefix([fromIdString, toIdString]))
+            value = String.to_integer(String.at(toIdString, samePre))
+            lengthLessLeaf =  length(state.lessLeaf)
+            lengthLargerLeaf =  length(state.largerLeaf)
+
+            cond do
+              (lengthLessLeaf > 0 && toId >= Enum.min(state.lessLeaf) && toId < state.id) || (lengthLargerLeaf > 0 && toId <= Enum.max(state.largerLeaf) && toId > state.id) ->
+                diff = abs(toId - state.id)
+                if toId < state.id do
+                  nearest_value = Enum.min_by(state.lessLeaf, &abs(&1 - toId))
+                  index = Enum.find_index(state.lessLeaf, fn(x) -> x== nearest_value end)
+                else
+                  nearest_value = Enum.min_by(state.largerLeaf, &abs(&1 - toId))
+                  index = Enum.find_index(state.largerLeaf, fn(x) -> x== nearest_value end)
+                end
+                leafDiff = abs(nearest_value - toId)
+                if diff > leafDiff do
+                  send ProcessRegistry.whereis_name(nearest_value), {msg, fromId, toId, hops + 1}
+                else
+                  send state.master, {:route_finished, fromId, toId, hops+1}
+                end
+
+              lengthLessLeaf < 4 && lengthLessLeaf > 0 && toId < Enum.min(state.lessLeaf) ->
+
+                send ProcessRegistry.whereis_name(Enum.min(state.lessLeaf)), {msg, fromId, toId, hops + 1}
+
+              lengthLargerLeaf < 4 && lengthLargerLeaf > 0 && toId > Enum.max(state.largerLeaf) ->
+
+                send ProcessRegistry.whereis_name(Enum.max(state.largerLeaf)), {msg, fromId, toId, hops + 1}
+
+              (lengthLessLeaf == 0 && toId < state.id) || (lengthLargerLeaf == 0 && toId > state.id)  ->
+
+                send state.master, {:route_finished, fromId, toId, hops+1}
+
+              Enum.at(Enum.at(state.table, samePre), value) != -1 ->
+
+                send ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, samePre), value)), {msg, fromId, toId, hops + 1}
+
+              toId > state.id ->
+
+                send ProcessRegistry.whereis_name(Enum.max(state.largerLeaf)), {msg, fromId, toId, hops + 1}
+
+              toId <state.id ->
+
+                send ProcessRegistry.whereis_name(Enum.min(state.lessLeaf)), {msg, fromId, toId, hops + 1}
+
+              true ->
+
+            end
+          end
+        end
+        run(state)
+
+      {:periodical, msg} ->
+        random = Enum.random(0..state.nodeIDSpace-1)
+        send self(), {msg, state.id, random, -1}
+        Process.send_after(self(), {:periodical, msg}, 5)
+        run(state)
+
+      :begin_route ->
+        for index <- 0..state.numRequests-1 do
+          send self(), {:periodical,"route"}
+        end
+        run(state)
     end
   end
 
@@ -190,4 +286,80 @@ defmodule PastryActor do
       addBuffer(firstGroup, state, index-1)
   end
 
+end
+
+
+defmodule ProcessRegistry do
+  import Kernel, except: [send: 2]
+
+  use GenServer
+
+  # Client API #
+  def start_link do
+    GenServer.start_link(__MODULE__, nil, name: :registry)
+  end
+
+  def register_name(key, pid) when is_pid(pid) do
+    GenServer.call(:registry, {:register_name, key, pid})
+  end
+
+  def unregister_name(key) do
+    GenServer.call(:registry, {:unregister_name, key})
+  end
+
+  def whereis_name(key) do
+    GenServer.call(:registry, {:whereis_name, key})
+  end
+
+  def send(key, msg) do
+    case whereis_name(key) do
+      pid when is_pid(pid) ->
+        Kernel.send(pid, msg)
+        pid
+
+      :undefined -> {:badarg, {key, msg}}
+    end
+  end
+
+  # Server API #
+  def init(nil) do
+    {:ok, %{}}
+  end
+
+  def handle_call({:unregister_name, key}, _from, registry) do
+    {:reply, key, deregister(registry, key)}
+  end
+
+  def handle_call({:register_name, key, pid}, _from, registry) do
+    case Map.get(registry, key, nil) do
+      nil ->
+        Process.monitor(pid)
+        registry = Map.put(registry, key, pid)
+        {:reply, :yes, registry}
+
+      _ -> {:reply, :no, registry}
+    end
+  end
+
+  def handle_call({:whereis_name, key}, _from, registry) do
+    {:reply, Map.get(registry, key, :undefined), registry}
+  end
+
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, registry) do
+    {:noreply, deregister(registry, pid)}
+  end
+
+  def handle_info(_info, registry), do: {:noreply, registry}
+
+  # Helper Functions #
+  defp deregister(registry, pid) when is_pid(pid) do
+    case Enum.find(registry, nil, fn({_key, cur_pid}) -> cur_pid == pid end) do
+      nil -> registry
+      {key, _pid} -> deregister(registry, key)
+    end
+  end
+
+  defp deregister(registry, key) do
+    Map.delete(registry, key)
+  end
 end
