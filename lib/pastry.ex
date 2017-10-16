@@ -32,6 +32,7 @@ defmodule GSP do
     IO.puts "Number Of Nodes: #{numNodes}"
     IO.puts "Node ID Space: 0 ~ #{nodeIDSpace - 1}"
     IO.puts "Number Of Request Per Node: #{numRequests}"
+    IO.puts "Number Of Request Per Node: #{logBase}"
     nodeIDs = for node_id <- 0..nodeIDSpace-1 do
       node_id
     end
@@ -68,7 +69,7 @@ defmodule GSP do
         run(state)
 
       :second_join ->
-        IO.puts "Second Join Begins..."
+        IO.puts "Second Join Begins...adding Node #{state.numJoined}"
         random = Enum.random(0..state.numJoined-1)
         startId = Enum.at(state.nodeIDs, random)
         toId = Enum.at(state.nodeIDs, state.numJoined)
@@ -173,14 +174,18 @@ defmodule PastryActor do
   def update(leaf, state, index) when index <= 0 do
     numOfBack = state.numOfBack + 1
     state = Map.put(state, :numOfBack, numOfBack)
-    send ProcessRegistry.whereis_name(Enum.at(leaf, index)), {:update_me, state.id, self()}
+    if Enum.at(leaf, index) != nil do
+      send ProcessRegistry.whereis_name(Enum.at(leaf, index)), {:update_me, state.id, self()}
+    end
     state
   end
 
   def update(leaf, state, index) do
     numOfBack = state.numOfBack + 1
     state = Map.put(state, :numOfBack, numOfBack)
-    send ProcessRegistry.whereis_name(Enum.at(leaf, index)), {:update_me, state.id, self()}
+    if Enum.at(leaf, index) != nil do
+      send ProcessRegistry.whereis_name(Enum.at(leaf, index)), {:update_me, state.id, self()}
+    end
     update(leaf, state, index-1)
   end
 
@@ -225,7 +230,7 @@ defmodule PastryActor do
           for i <- 0..new_state.length-1 do
             for j<- 0..new_state.base-1 do
               if Enum.at(Enum.at(new_state.table, i), j) != -1 do
-                send ProcessRegistry.whereis_name(Enum.at(Enum.at(new_state.table, i), j)), {:update_me, new_state.id}
+                send ProcessRegistry.whereis_name(Enum.at(Enum.at(new_state.table, i), j)), {:update_me, new_state.id, self()}
               end
             end
           end
@@ -424,6 +429,9 @@ defmodule PastryActor do
             state = Map.put(state, :lessLeaf, new_leaf)
           end
         end
+
+      true ->
+
     end
     id_string = toBaseString(state.id, state.base, state.length)
     node_string = toBaseString(node_id, state.base, state.length)
