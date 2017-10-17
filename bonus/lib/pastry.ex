@@ -58,7 +58,7 @@ defmodule GSP do
       pid
     end
 
-    ProcessRegistry.register_name(-1, self())
+    ProcessRegistry.register_name(-100, self())
 
     send self(), :go
     run(Map.merge(@default_state, %{numFailures: numFailures, nodeIDs: nodeIDs, firstGroup: firstGroup, pids: pids, numFirst: numFirst, numNodes: numNodes, numRequests: numRequests}))
@@ -75,7 +75,7 @@ defmodule GSP do
         run(state)
 
       :second_join ->
-        IO.puts "Second Join Begins...adding Node #{state.numJoined}"
+        #IO.puts "Second Join Begins...adding Node #{state.numJoined}"
         random = Enum.random(0..state.numJoined-1)
         startId = Enum.at(state.nodeIDs, random)
         toId = Enum.at(state.nodeIDs, state.numJoined)
@@ -86,24 +86,27 @@ defmodule GSP do
         IO.puts "Join Finished!"
         IO.puts "Routing Begins..."
         for pid <- state.pids do
-          send pid, :begin_route
+          if Process.alive?(pid) do
+            send pid, :begin_route
+          end
         end
         run(state)
 
       :create_failure ->
-        if state.numFailures-1 > 0 do
           for i <- 0..state.numFailures-1 do
-            IO.puts "hello"
             goDiePid = ProcessRegistry.whereis_name(Enum.at(state.nodeIDs, i))
-            send goDiePid, {:go_die, state.pids}
+            if is_pid(goDiePid) do
+              send goDiePid, {:go_die, state.pids}
+            end
           end
-        end
-        send self(), :begin_route
+
+        Process.send_after(self(), :begin_route, 1000)
         run(state)
 
       :join_finish ->
         numJoined = state.numJoined + 1
         new_state = Map.put(state, :numJoined, numJoined)
+
         if numJoined == state.numFirst do
           if numJoined >= state.numNodes do
             send self(), :create_failure
@@ -114,7 +117,7 @@ defmodule GSP do
 
         if numJoined > state.numFirst do
           if numJoined == state.numNodes do
-            send self(), :CreateFailures
+            send self(), :create_failure
           else
             send self(), :second_join
           end
@@ -136,12 +139,15 @@ defmodule GSP do
         numHops = state.numHops + hops
         state = Map.put(state, :numRouted, numRouted)
         new_state = Map.put(state, :numHops, numHops)
+
+        #IO.puts "#{numRouted} #{round((new_state.numNodes - new_state.numFailures) * new_state.numRequests)}"
         for i <- 1..10 do
           if numRouted == round( (new_state.numNodes - new_state.numFailures) * new_state.numRequests * i / 10) do
             IO.puts "#{i}0% Routing Finished..."
           end
         end
-        if numRouted >= (new_state.numNodes - new_state.numFailures) * state.numRequests do
+
+        if numRouted >= 0.95*round((new_state.numNodes - new_state.numFailures) * new_state.numRequests) do
           IO.puts "Number of Total Routes: #{numRouted}"
           IO.puts "Number of Total Hops: #{numHops}"
           IO.puts "Average Hops Per Route: #{numHops / numRouted}"
@@ -219,6 +225,23 @@ defmodule PastryActor do
     new_table = List.replace_at(state.table, index, List.replace_at(Enum.at(state.table, index), value, state.id))
     state = Map.put(state, :table, new_table)
     modify_table(state, index-1)
+  end
+
+  def nearest_fun(state, samePre, nearest, toId, diff, index) when index <= 0 do
+    value = Enum.at(Enum.at(state.table, samePre), index)
+    if  value != -1 && abs(value-toId) < diff do
+      nearest = value
+    end
+    nearest
+  end
+
+  def nearest_fun(state, samePre, nearest, toId, diff, index) do
+    value = Enum.at(Enum.at(state.table, samePre), index)
+    if  value != -1 && abs(value-toId) < diff do
+      diff = abs(value-toId)
+      nearest = value
+    end
+    nearest_fun(state, samePre, nearest, toId, diff, index-1)
   end
 
   def leaf_recovers(newList, state, index) when index <= 0 do
@@ -391,7 +414,8 @@ defmodule PastryActor do
           run(state)
 
       {:request_leaf_without, removeId, sender} ->
-          tempLeaf =  state.lessLeaf ++ state.largerLeaf -- [removeId]
+          tempLeaf =  state.lessLeaf ++ state.largerLeaf
+          tempLeaf =  tempLeaf -- [removeId]
           send sender, {:leaf_recover, tempLeaf, removeId}
           run(state)
 
@@ -453,15 +477,34 @@ defmodule PastryActor do
 
                 send ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, samePre), value)), {msg, fromId, toId, hops + 1}
 
-              toId > state.id ->
 
-                send ProcessRegistry.whereis_name(Enum.max(state.largerLeaf)), {msg, fromId, toId, hops + 1}
-                send state.master, :not_in_both
+              true ->
 
-              toId < state.id ->
+                diff = state.nodeIDSpace + 10
+                nearest = -1
+                nearest = nearest_fun(state, samePre, nearest, toId, diff, state.base-1)
 
-                send ProcessRegistry.whereis_name(Enum.min(state.lessLeaf)), {msg, fromId, toId, hops + 1}
-                send state.master, :not_in_both
+                if nearest != -1 do
+                  if nearest > state.id do
+                    pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
+                    if is_pid(pid) do
+                      send pid, {msg, fromId, toId, hops + 1}
+                    end
+                    send state.master, :route_not_in_both
+                  end
+                  if nearest < state.id do
+                    pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
+                    if is_pid(pid) do
+                      send pid, {msg, fromId, toId, hops + 1}
+                    end
+                    send state.master, :route_not_in_both
+                  end
+                else
+                  pid = ProcessRegistry.whereis_name(nearest)
+                  if is_pid(pid) do
+                    send ProcessRegistry.whereis_name(nearest), {msg, fromId, toId, hops + 1}
+                  end
+                end
             end
 
           "route" ->
@@ -517,22 +560,33 @@ defmodule PastryActor do
                   send pid, {msg, fromId, toId, hops + 1}
                 end
 
-              toId > state.id ->
-                pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
-                if is_pid(pid) do
-                  send pid, {msg, fromId, toId, hops + 1}
-                end
-                send state.master, :route_not_in_both
-
-              toId < state.id ->
-                pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
-                if is_pid(pid) do
-                  send pid, {msg, fromId, toId, hops + 1}
-                end
-                send state.master, :route_not_in_both
-
               true ->
-                IO.puts "impossible"
+
+                diff = state.nodeIDSpace + 10
+                nearest = -1
+                nearest = nearest_fun(state, samePre, nearest, toId, diff, state.base-1)
+
+                if nearest != -1 do
+                  if nearest > state.id do
+                    pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
+                    if is_pid(pid) do
+                      send pid, {msg, fromId, toId, hops + 1}
+                    end
+                    send state.master, :route_not_in_both
+                  end
+                  if nearest < state.id do
+                    pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
+                    if is_pid(pid) do
+                      send pid, {msg, fromId, toId, hops + 1}
+                    end
+                    send state.master, :route_not_in_both
+                  end
+                else
+                  pid = ProcessRegistry.whereis_name(nearest)
+                  if is_pid(pid) do
+                    send ProcessRegistry.whereis_name(nearest), {msg, fromId, toId, hops + 1}
+                  end
+                end
             end
           end
         end
