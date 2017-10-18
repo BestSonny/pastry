@@ -23,11 +23,6 @@ defmodule GSP do
   end
 
   def pastry(numNodes, numRequests, numFailures, base \\ 2) do
-
-    if numFailures >= numNodes do
-      IO.puts "Sorry! Failed nodes can not be more than total number of nodes!"
-      Process.exit(self(),:normal)
-    end
     #process registry
     {:ok,server_pid} = ProcessRegistry.start_link
 
@@ -36,8 +31,8 @@ defmodule GSP do
     nodeIDSpace = round(:math.pow(base, logBase))
     numFirst = if numNodes <= 1024 do numNodes else 1024 end
     IO.puts "Number Of Nodes: #{numNodes}"
-    IO.puts "Number Of Failures: #{numFailures}"
     IO.puts "Node ID Space: 0 ~ #{nodeIDSpace - 1}"
+    IO.puts "Number Of Failures: #{numFailures}"
     IO.puts "Number Of Request Per Node: #{numRequests}"
     nodeIDs = for node_id <- 0..nodeIDSpace-1 do
       node_id
@@ -86,39 +81,36 @@ defmodule GSP do
         IO.puts "Join Finished!"
         IO.puts "Routing Begins..."
         for pid <- state.pids do
-          if Process.alive?(pid) do
-            send pid, :begin_route
-          end
+          send pid, :begin_route
         end
         run(state)
 
       :create_failure ->
-          if state.numFailures > 0 do
-            for i <- 0..state.numFailures-1 do
-              goDiePid = ProcessRegistry.whereis_name(Enum.at(state.nodeIDs, i))
-              if is_pid(goDiePid) do
-                send goDiePid, {:go_die, state.pids}
-              end
-            end
-          end
+             if state.numFailures > 0 do
+               for i <- 0..state.numFailures-1 do
+                 goDiePid = ProcessRegistry.whereis_name(Enum.at(state.nodeIDs, i))
+                 if is_pid(goDiePid) do
+                   send goDiePid, {:go_die, state.pids}
+                 end
+               end
+             end
 
-        Process.send_after(self(), :begin_route, 1000)
-        run(state)
+           Process.send_after(self(), :begin_route, 5)
+           run(state)
 
       :join_finish ->
         numJoined = state.numJoined + 1
         new_state = Map.put(state, :numJoined, numJoined)
-
-        if numJoined == new_state.numFirst do
-          if numJoined >= new_state.numNodes do
+        if numJoined == state.numFirst do
+          if numJoined >= state.numNodes do
             send self(), :create_failure
           else
             send self(), :second_join
           end
         end
 
-        if numJoined > new_state.numFirst do
-          if numJoined == new_state.numNodes do
+        if numJoined > state.numFirst do
+          if numJoined == state.numNodes do
             send self(), :create_failure
           else
             send self(), :second_join
@@ -141,8 +133,6 @@ defmodule GSP do
         numHops = state.numHops + hops
         state = Map.put(state, :numRouted, numRouted)
         new_state = Map.put(state, :numHops, numHops)
-
-        #IO.puts "#{numRouted} #{round((new_state.numNodes - new_state.numFailures) * new_state.numRequests)}"
         for i <- 1..10 do
           if numRouted == round( (new_state.numNodes - new_state.numFailures) * new_state.numRequests * i / 10) do
             IO.puts "#{i}0% Routing Finished..."
@@ -196,19 +186,19 @@ defmodule PastryActor do
   end
 
   def update(leaf, state, index) when index <= 0 do
-    numOfBack = state.numOfBack + 1
-    state = Map.put(state, :numOfBack, numOfBack)
     if Enum.at(leaf, index) != nil do
       send ProcessRegistry.whereis_name(Enum.at(leaf, index)), {:update_me, state.id, self()}
+      numOfBack = state.numOfBack + 1
+      state = Map.put(state, :numOfBack, numOfBack)
     end
     state
   end
 
   def update(leaf, state, index) do
-    numOfBack = state.numOfBack + 1
-    state = Map.put(state, :numOfBack, numOfBack)
     if Enum.at(leaf, index) != nil do
       send ProcessRegistry.whereis_name(Enum.at(leaf, index)), {:update_me, state.id, self()}
+      numOfBack = state.numOfBack + 1
+      state = Map.put(state, :numOfBack, numOfBack)
     end
     update(leaf, state, index-1)
   end
@@ -253,7 +243,7 @@ defmodule PastryActor do
 
   def nearest_fun(state, samePre, nearest, toId, diff, index) when index <= 0 do
     value = Enum.at(Enum.at(state.table, samePre), index)
-    if  value != -1 && abs(value-toId) < diff do
+    if value != -1 && abs(value-toId) < diff do
       nearest = value
     end
     nearest
@@ -335,7 +325,6 @@ defmodule PastryActor do
     receive do
       :go ->
         run(state)
-
       {:first_join, firstGroup} ->
         firstGroup = List.delete(firstGroup, state.id)
         #IO.inspect "ID #{state.id} and #{inspect firstGroup}"
@@ -345,11 +334,11 @@ defmodule PastryActor do
         run(new_state)
 
       {:go_die, pids} ->
-        IO.puts "go Die...Node #{state.id}"
-        for pid <- pids do
-          send pid, {:remove_me, state.id}
-        end
-        Process.exit(self(),:normal)
+         IO.puts "go Die...Node #{state.id}"
+         for pid <- pids do
+           send pid, {:remove_me, state.id}
+         end
+         Process.exit(self(),:normal)
 
       {:add_row, rowNumber, newRow} ->
           new_state = replace_row(rowNumber, newRow, state, state.base-1)
@@ -376,47 +365,47 @@ defmodule PastryActor do
           end
           run(state)
 
-      {:remove_me, removeId} ->
-          if removeId > state.id && Enum.member?(state.largerLeaf, removeId) do
-            new_leaf = List.delete(state.largerLeaf, removeId)
-            state = Map.put(state, :largerLeaf, new_leaf)
-            if length(state.largerLeaf) > 0 do
-                pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
-                if is_pid(pid) do
-                  send pid, {:request_leaf_without, removeId, self()}
-                end
-            end
-          end
-
-          if removeId < state.id && Enum.member?(state.lessLeaf, removeId) do
-            new_leaf = List.delete(state.lessLeaf, removeId)
-            state = Map.put(state, :lessLeaf, new_leaf)
-            if length(state.lessLeaf) > 0 do
-                pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
-                if is_pid(pid) do
-                  send pid, {:request_leaf_without, removeId, self()}
-                end
-            end
-          end
-
-          id_string = toBaseString(state.id, state.base, state.length)
-          node_string = toBaseString(removeId, state.base, state.length)
-          samePre = String.length(commonPrefix([id_string, node_string]))
-          value = String.to_integer(String.at(node_string, samePre))
-          if Enum.at(Enum.at(state.table, samePre), value) ==  removeId do
-            new_table = List.replace_at(state.table, samePre, List.replace_at(Enum.at(state.table, samePre), value, -1))
-            state = Map.put(state, :table, new_table)
-            for i <- 0..state.base-1 do
-              currentId = Enum.at(Enum.at(state.table, samePre), i)
-              if currentId != state.id && currentId != removeId && currentId != -1 do
-                pid = ProcessRegistry.whereis_name(currentId)
-                if is_pid(pid) do
-                  send pid, {:request_in_table, samePre, value, self()}
+          {:remove_me, removeId} ->
+              if removeId > state.id && Enum.member?(state.largerLeaf, removeId) do
+                new_leaf = List.delete(state.largerLeaf, removeId)
+                state = Map.put(state, :largerLeaf, new_leaf)
+                if length(state.largerLeaf) > 0 do
+                    pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
+                    if is_pid(pid) do
+                      send pid, {:request_leaf_without, removeId, self()}
+                    end
                 end
               end
-            end
-          end
-          run(state)
+
+              if removeId < state.id && Enum.member?(state.lessLeaf, removeId) do
+                new_leaf = List.delete(state.lessLeaf, removeId)
+                state = Map.put(state, :lessLeaf, new_leaf)
+                if length(state.lessLeaf) > 0 do
+                    pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
+                    if is_pid(pid) do
+                      send pid, {:request_leaf_without, removeId, self()}
+                    end
+                end
+              end
+
+              id_string = toBaseString(state.id, state.base, state.length)
+              node_string = toBaseString(removeId, state.base, state.length)
+              samePre = String.length(commonPrefix([id_string, node_string]))
+              value = String.to_integer(String.at(node_string, samePre))
+              if Enum.at(Enum.at(state.table, samePre), value) ==  removeId do
+                new_table = List.replace_at(state.table, samePre, List.replace_at(Enum.at(state.table, samePre), value, -1))
+                state = Map.put(state, :table, new_table)
+                for i <- 0..state.base-1 do
+                  currentId = Enum.at(Enum.at(state.table, samePre), i)
+                  if currentId != state.id && currentId != removeId && currentId != -1 do
+                    pid = ProcessRegistry.whereis_name(currentId)
+                    if is_pid(pid) do
+                      send pid, {:request_in_table, samePre, value, self()}
+                    end
+                  end
+                end
+              end
+              run(state)
 
       {:request_in_table, samePre, column, sender} ->
           if Enum.at(Enum.at(state.table, samePre), column) != -1 do
@@ -459,86 +448,7 @@ defmodule PastryActor do
             end
 
             send ProcessRegistry.whereis_name(toId), {:add_row, samePre, Enum.at(state.table, samePre)}
-
-            cond do
-              (lengthLessLeaf > 0 && toId >= Enum.min(state.lessLeaf) && toId <= state.id) || (lengthLargerLeaf > 0 && toId <= Enum.max(state.largerLeaf) && toId >= state.id) ->
-                diff = abs(toId - state.id)
-                nearest_value = -1
-                if toId < state.id do
-                  nearest_value = Enum.min_by(state.lessLeaf, &abs(&1 - toId))
-                  #index = Enum.find_index(state.lessLeaf, fn(x) -> x== nearest_value end)
-                else
-                  nearest_value = Enum.min_by(state.largerLeaf, &abs(&1 - toId))
-                  #index = Enum.find_index(state.largerLeaf, fn(x) -> x== nearest_value end)
-                end
-                leafDiff = abs(nearest_value - toId)
-
-                if diff > leafDiff do
-                  send ProcessRegistry.whereis_name(nearest_value), {msg, fromId, toId, hops + 1}
-                else
-                  allLeaf = [state.id] ++ state.lessLeaf ++ state.largerLeaf
-                  send ProcessRegistry.whereis_name(toId), {:add_leaf, allLeaf}
-                end
-
-              lengthLessLeaf < 4 && lengthLessLeaf > 0 && toId < Enum.min(state.lessLeaf) ->
-
-                send ProcessRegistry.whereis_name(Enum.min(state.lessLeaf)), {msg, fromId, toId, hops + 1}
-
-              lengthLargerLeaf < 4 && lengthLargerLeaf > 0 && toId > Enum.max(state.largerLeaf) ->
-
-                send ProcessRegistry.whereis_name(Enum.max(state.largerLeaf)), {msg, fromId, toId, hops + 1}
-
-              (lengthLessLeaf == 0 && toId < state.id) || (lengthLargerLeaf == 0 && toId > state.id)  ->
-
-                allLeaf = [state.id] ++ state.lessLeaf ++ state.largerLeaf
-                send ProcessRegistry.whereis_name(toId), {:add_leaf, allLeaf}
-
-              Enum.at(Enum.at(state.table, samePre), value) != -1 ->
-
-                send ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, samePre), value)), {msg, fromId, toId, hops + 1}
-
-
-              true ->
-
-                diff = state.nodeIDSpace + 10
-                nearest = -1
-                nearest = nearest_fun(state, samePre, nearest, toId, diff, state.base-1)
-
-                if nearest != -1 do
-                  if nearest == state.id do
-                    if toId > state.id do
-                      pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
-                      if is_pid(pid) do
-                        send pid, {msg, fromId, toId, hops + 1}
-                      end
-                      send state.master, :route_not_in_both
-                    end
-                    if toId < state.id do
-                      pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
-                      if is_pid(pid) do
-                        send pid, {msg, fromId, toId, hops + 1}
-                      end
-                      send state.master, :route_not_in_both
-                    end
-                  else
-                    pid = ProcessRegistry.whereis_name(nearest)
-                    if is_pid(pid) do
-                      send ProcessRegistry.whereis_name(nearest), {msg, fromId, toId, hops + 1}
-                    end
-                  end
-                end
-            end
-
-          "route" ->
-          if state.id == toId do
-            send state.master, {:route_finished, fromId, toId, hops+1}
-          else
-            fromIdString = toBaseString(state.id, state.base, state.length)
-            toIdString = toBaseString(toId, state.base, state.length)
-            samePre = String.length(commonPrefix([fromIdString, toIdString]))
-            value = String.to_integer(String.at(toIdString, samePre))
-            lengthLessLeaf =  length(state.lessLeaf)
-            lengthLargerLeaf =  length(state.largerLeaf)
+            pid = -1
             cond do
               (lengthLessLeaf > 0 && toId >= Enum.min(state.lessLeaf) && toId < state.id) || (lengthLargerLeaf > 0 && toId <= Enum.max(state.largerLeaf) && toId > state.id) ->
                 diff = abs(toId - state.id)
@@ -553,34 +463,34 @@ defmodule PastryActor do
 
                 if diff > leafDiff do
                   pid = ProcessRegistry.whereis_name(nearest_value)
-                  if is_pid(pid) do
-                    send pid, {msg, fromId, toId, hops + 1}
-                  end
                 else
-                  send state.master, {:route_finished, fromId, toId, hops+1}
+                  allLeaf = [state.id] ++ state.lessLeaf ++ state.largerLeaf
+                  send ProcessRegistry.whereis_name(toId), {:add_leaf, allLeaf}
                 end
 
               lengthLessLeaf < 4 && lengthLessLeaf > 0 && toId < Enum.min(state.lessLeaf) ->
                 pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
-                if is_pid(pid) do
-                  send pid, {msg, fromId, toId, hops + 1}
-                end
 
               lengthLargerLeaf < 4 && lengthLargerLeaf > 0 && toId > Enum.max(state.largerLeaf) ->
                 pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
-                if is_pid(pid) do
-                  send pid, {msg, fromId, toId, hops + 1}
-                end
 
               (lengthLessLeaf == 0 && toId < state.id) || (lengthLargerLeaf == 0 && toId > state.id)  ->
 
-                send state.master, {:route_finished, fromId, toId, hops+1}
+                allLeaf = [state.id] ++ state.lessLeaf ++ state.largerLeaf
+                send ProcessRegistry.whereis_name(toId), {:add_leaf, allLeaf}
 
               Enum.at(Enum.at(state.table, samePre), value) != -1 ->
                 pid = ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, samePre), value))
-                if is_pid(pid) do
-                  send pid, {msg, fromId, toId, hops + 1}
-                end
+
+              #toId > state.id ->
+              #
+              #  send ProcessRegistry.whereis_name(Enum.max(state.largerLeaf)), {msg, fromId, toId, hops + 1}
+              #  send state.master, :not_in_both
+              #
+              #toId < state.id ->
+              #
+              #  send ProcessRegistry.whereis_name(Enum.min(state.lessLeaf)), {msg, fromId, toId, hops + 1}
+              #  send state.master, :not_in_both
 
               true ->
 
@@ -592,26 +502,86 @@ defmodule PastryActor do
                   if nearest == state.id do
                     if toId > state.id do
                       pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
-                      if is_pid(pid) do
-                        send pid, {msg, fromId, toId, hops + 1}
-                      end
                       send state.master, :route_not_in_both
                     end
                     if toId < state.id do
                       pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
-                      if is_pid(pid) do
-                        send pid, {msg, fromId, toId, hops + 1}
-                      end
                       send state.master, :route_not_in_both
                     end
                   else
                     pid = ProcessRegistry.whereis_name(nearest)
-                    if is_pid(pid) do
-                      send ProcessRegistry.whereis_name(nearest), {msg, fromId, toId, hops + 1}
-                    end
                   end
                 end
+            end
+            if is_pid(pid) do
+              send pid, {msg, fromId, toId, hops + 1}
+            end
 
+          "route" ->
+          if state.id == toId do
+            send state.master, {:route_finished, fromId, toId, hops+1}
+          else
+            fromIdString = toBaseString(state.id, state.base, state.length)
+            toIdString = toBaseString(toId, state.base, state.length)
+            samePre = String.length(commonPrefix([fromIdString, toIdString]))
+            value = String.to_integer(String.at(toIdString, samePre))
+            lengthLessLeaf =  length(state.lessLeaf)
+            lengthLargerLeaf =  length(state.largerLeaf)
+            pid = -1
+            cond do
+              (lengthLessLeaf > 0 && toId >= Enum.min(state.lessLeaf) && toId < state.id) || (lengthLargerLeaf > 0 && toId <= Enum.max(state.largerLeaf) && toId > state.id) ->
+                diff = abs(toId - state.id)
+                if toId < state.id do
+                  nearest_value = Enum.min_by(state.lessLeaf, &abs(&1 - toId))
+                  #index = Enum.find_index(state.lessLeaf, fn(x) -> x== nearest_value end)
+                else
+                  nearest_value = Enum.min_by(state.largerLeaf, &abs(&1 - toId))
+                  #index = Enum.find_index(state.largerLeaf, fn(x) -> x== nearest_value end)
+                end
+                leafDiff = abs(nearest_value - toId)
+
+                if diff > leafDiff do
+                  pid = ProcessRegistry.whereis_name(nearest_value)
+                else
+                  send state.master, {:route_finished, fromId, toId, hops+1}
+                end
+
+              lengthLessLeaf < 4 && lengthLessLeaf > 0 && toId < Enum.min(state.lessLeaf) ->
+                pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
+
+              lengthLargerLeaf < 4 && lengthLargerLeaf > 0 && toId > Enum.max(state.largerLeaf) ->
+                pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
+
+              (lengthLessLeaf == 0 && toId < state.id) || (lengthLargerLeaf == 0 && toId > state.id)  ->
+                send state.master, {:route_finished, fromId, toId, hops+1}
+
+              Enum.at(Enum.at(state.table, samePre), value) != -1 ->
+                pid = ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, samePre), value))
+
+
+              true ->
+
+                diff = state.nodeIDSpace + 10
+                nearest = -1
+                nearest = nearest_fun(state, samePre, nearest, toId, diff, state.base-1)
+
+                if nearest != -1 do
+                  if nearest == state.id do
+                    if toId > state.id do
+                      pid = ProcessRegistry.whereis_name(Enum.max(state.largerLeaf))
+                      send state.master, :route_not_in_both
+                    end
+                    if toId < state.id do
+                      pid = ProcessRegistry.whereis_name(Enum.min(state.lessLeaf))
+                      send state.master, :route_not_in_both
+                    end
+                  else
+                    pid = ProcessRegistry.whereis_name(nearest)
+                  end
+                end
+            end
+            if is_pid(pid) do
+              send pid, {msg, fromId, toId, hops + 1}
             end
           end
         end
@@ -637,8 +607,6 @@ defmodule PastryActor do
     index = Enum.find_index(0..String.length(min), fn i -> String.at(min,i) != String.at(max,i) end)
     if index, do: String.slice(min, 0, index), else: min
   end
-
-
 
 
   def toBaseString(id, base, length) do

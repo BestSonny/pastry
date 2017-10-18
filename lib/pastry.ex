@@ -171,21 +171,43 @@ defmodule PastryActor do
   end
 
   def update(leaf, state, index) when index <= 0 do
-    numOfBack = state.numOfBack + 1
-    state = Map.put(state, :numOfBack, numOfBack)
     if Enum.at(leaf, index) != nil do
       send ProcessRegistry.whereis_name(Enum.at(leaf, index)), {:update_me, state.id, self()}
+      numOfBack = state.numOfBack + 1
+      state = Map.put(state, :numOfBack, numOfBack)
     end
     state
   end
 
   def update(leaf, state, index) do
-    numOfBack = state.numOfBack + 1
-    state = Map.put(state, :numOfBack, numOfBack)
     if Enum.at(leaf, index) != nil do
       send ProcessRegistry.whereis_name(Enum.at(leaf, index)), {:update_me, state.id, self()}
+      numOfBack = state.numOfBack + 1
+      state = Map.put(state, :numOfBack, numOfBack)
     end
     update(leaf, state, index-1)
+  end
+
+  def update_check(state, index) when index <= 0 do
+    row = div(index, state.base)
+    col = rem(index, state.base)
+    if Enum.at(Enum.at(state.table, row), col) != -1 do
+      numOfBack = state.numOfBack + 1
+      state = Map.put(state, :numOfBack, numOfBack)
+      send ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, row), col)), {:update_me, state.id, self()}
+    end
+    state
+  end
+
+  def update_check(state, index) do
+    row = div(index, state.base)
+    col = rem(index, state.base)
+    if Enum.at(Enum.at(state.table, row), col) != -1 do
+      numOfBack = state.numOfBack + 1
+      state = Map.put(state, :numOfBack, numOfBack)
+      send ProcessRegistry.whereis_name(Enum.at(Enum.at(state.table, row), col)), {:update_me, state.id, self()}
+    end
+    update_check(state, index-1)
   end
 
   def modify_table(state, index) when index <= 0 do
@@ -226,13 +248,7 @@ defmodule PastryActor do
           new_state = addBuffer(allLeaf, state, length(allLeaf)-1)
           new_state = update(new_state.lessLeaf, new_state, length(new_state.lessLeaf)-1)
           new_state = update(new_state.largerLeaf, new_state, length(new_state.largerLeaf)-1)
-          for i <- 0..new_state.length-1 do
-            for j<- 0..new_state.base-1 do
-              if Enum.at(Enum.at(new_state.table, i), j) != -1 do
-                send ProcessRegistry.whereis_name(Enum.at(Enum.at(new_state.table, i), j)), {:update_me, new_state.id, self()}
-              end
-            end
-          end
+          new_state = update_check(new_state, new_state.length*new_state.base-1)
           new_state = modify_table(new_state, new_state.length-1)
           run(new_state)
 
